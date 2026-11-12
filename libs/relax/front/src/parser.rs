@@ -1554,10 +1554,24 @@ impl<'a> Parser<'a> {
         id
     }
 
-    /// rustc legacy scope: is the written `macro_rules!` `d` of this file in scope at the cursor
+    /// rustc legacy scope: is the written `macro_rules!` `d` in scope at the cursor
     /// (its enclosing block / module without `#[macro_use]` still open)? Anything not known to be
     /// out of scope counts as in scope.
     fn rules_in_textual_scope(&self, d: &crate::macros::MacroDef, mut at: u32) -> bool {
+        if d.builtin != 0 || d.exported { return true; }
+        if self.bctx.as_ref().is_some_and(|c| c.path != d.def_file) {
+            // A macro handed out of a file module enters the parent only after
+            // its `mod` declaration. Definition offsets belong to the child;
+            // use the module boundaries and this call's authored position.
+            let mut invocation = at;
+            while invocation as usize >= self.src.len() {
+                let Some(call) = region_of(self.exp_map.view(), invocation).filter(|&call| call < invocation) else { break; };
+                invocation = call;
+            }
+            return self.macros.as_ref().and_then(|m| m.table.crates.get(&self.krate))
+                .map_or(true, |c| c.in_textual_scope(d, &self.cur_module(),
+                    ((invocation as usize) < self.src.len()).then_some(invocation)));
+        }
         // Expansion text is appended after the source, not after every written
         // definition in lexical scope. Compare a written definition against the
         // expansion's invocation (following nested expansions), otherwise a later
@@ -1570,7 +1584,7 @@ impl<'a> Parser<'a> {
             }
         }
         let pos = if (at as usize) < self.src.len() { d.scope_pos.unwrap_or(d.def_pos) } else { d.def_pos };
-        if d.builtin != 0 || d.exported || (pos as usize) >= self.src.len() || !self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) {
+        if (pos as usize) >= self.src.len() || !self.bctx.as_ref().is_some_and(|c| c.path == d.def_file) {
             return true;
         }
         // defined further down: not in scope yet
