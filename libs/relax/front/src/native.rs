@@ -242,7 +242,7 @@ pub fn build(g: &Graph, seeds: &[usize], req: &Request) -> Result<Built, String>
 
     let fast_mark = format!("{}/fast", dir);
     let messages = match std::fs::read_to_string(&messages_path) {
-        Ok(m) if std::fs::metadata(&lib_path).is_ok() || !m.contains("\"linked_libs\"") => m,
+        Ok(m) if std::fs::metadata(&lib_path).is_ok() || cached_without_library(&g.pkg, &script_table(g), seeds, &m) => m,
         _ => {
             let m = run_cargo(g, req, &exe, &flags, &script_pkgs, &lib_pkgs, seeds, Tier::Fast)?;
             std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {}", dir, e))?;
@@ -303,6 +303,52 @@ fn script_table(g: &Graph) -> Vec<(usize, Vec<String>)> {
 
 fn outputs(g: &Graph, seeds: &[usize], messages: &str) -> Result<Outputs, String> {
     outputs_with(&g.pkg, &script_table(g), seeds, messages)
+}
+
+/// Cargo emits `linked_libs` even when it is empty. Such scripts may only
+/// produce cfg/env/generated files and never need a linked native library.
+/// Reuse only complete selected-package results with surviving generated outputs.
+/// Missing or uncertain coverage, malformed output, and link requirements rebuild.
+fn cached_without_library(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str) -> bool {
+    use crate::json::Json;
+    if messages.is_empty() { return false; }
+    let mut expected = std::collections::BTreeMap::new();
+    for &s in seeds {
+        let (krate, features) = &scripts_of[s];
+        let p = &pkg[*krate];
+        let mut features = features.clone();
+        features.sort();
+        features.dedup();
+        expected.entry((p.1.clone(), p.2.clone())).or_insert_with(std::collections::BTreeSet::new).insert(features);
+    }
+    let mut seen = std::collections::BTreeMap::new();
+    for line in messages.lines() {
+        let Ok(j) = crate::json::parse(line.as_bytes()) else { return false };
+        if j.get("reason").map(Json::str) != Some("build-script-executed") { return false; }
+        let Some(Json::Str(id)) = j.get("package_id") else { return false };
+        let key = id_name_version(id);
+        if !expected.contains_key(&key) { return false; }
+        let Some(Json::Str(dir)) = j.get("out_dir") else { return false };
+        if dir.is_empty() || !std::path::Path::new(dir).is_dir() { return false; }
+        for field in ["linked_libs", "linked_paths", "cfgs"] {
+            if !matches!(j.get(field), Some(Json::Arr(a)) if a.iter().all(|v| matches!(v, Json::Str(_)))) { return false; }
+        }
+        if !matches!(j.get("env"), Some(Json::Arr(a)) if a.iter().all(|v| matches!(v, Json::Arr(pair) if matches!(pair.as_slice(), [Json::Str(_), Json::Str(_)])))) { return false; }
+        let host = match j.get("relax_host") {
+            Some(Json::Bool(host)) => *host,
+            None => false,
+            _ => return false,
+        };
+        let (dirs, target) = seen.entry(key).or_insert_with(|| (std::collections::BTreeSet::new(), false));
+        dirs.insert(dir.clone());
+        *target |= !host;
+    }
+    // Cargo does not record feature sets on these messages. Distinct sets need
+    // distinct outputs; repeated seeds and duplicate messages cannot prove more
+    // coverage. A host-only message cannot stand in for the target result.
+    if expected.iter().any(|(key, variants)| !seen.get(key).is_some_and(|(dirs, target)| *target && dirs.len() >= variants.len())) { return false; }
+    outputs_with(pkg, scripts_of, seeds, messages)
+        .is_ok_and(|out| out.archives.is_empty() && out.dylibs.is_empty() && out.frameworks.is_empty())
 }
 
 fn outputs_with(pkg: &[(String, String, String)], scripts_of: &[(usize, Vec<String>)], seeds: &[usize], messages: &str) -> Result<Outputs, String> {
@@ -942,6 +988,50 @@ fn native_key_uses_sorted_resolved_packages() {
     other_source.pkg.0 = "other/a".into();
     assert_ne!(key, resolved_packages_key(&[other_source, b]),
         "a resolved source change must invalidate native artifacts");
+}
+
+#[cfg(test)]
+#[test]
+fn cached_script_metadata_does_not_require_a_nonexistent_library() {
+    struct Temp(std::path::PathBuf);
+    impl Drop for Temp { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+    let tmp = Temp(std::env::temp_dir().join(format!("relax-native-cache-{}", std::process::id())));
+    let target = tmp.0.join("target-out");
+    let host = tmp.0.join("host-out");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::create_dir_all(&host).unwrap();
+    let quoted = |dir: &std::path::Path| dir.to_str().unwrap().replace('\\', "\\\\").replace('"', "\\\"");
+    let pkg = [(String::new(), "cfg_only".into(), "1.0.0".into()), (String::new(), "other".into(), "1.0.0".into())];
+    let scripts = [(0, Vec::new()), (1, Vec::new()), (0, vec!["host-feature".into()]), (0, Vec::new())];
+    let message = |libs: &str| format!(r#"{{"reason":"build-script-executed","package_id":"registry+https://example.test/index#cfg_only@1.0.0","linked_libs":{libs},"linked_paths":[],"cfgs":["has_feature"],"env":[["GENERATED","yes"]],"out_dir":"{}"}}"#, quoted(&target));
+    assert!(cached_without_library(&pkg, &scripts, &[0], &message("[]")));
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &message(r#"["dylib=m"]"#)));
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &message(r#"["framework=CoreFoundation"]"#)));
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &message(r#"["static=missing"]"#)));
+    let archive = target.join("libpresent.a");
+    std::fs::write(&archive, b"!<arch>\n").unwrap();
+    let static_msg = message(r#"["static=present"]"#).replace("\"linked_paths\":[]", &format!("\"linked_paths\":[\"native={}\"]", quoted(&target)));
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &static_msg), "an existing archive still needs linking");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], "invalid JSON"));
+    let msg = message("[]");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], ""), "empty cache");
+    assert!(!cached_without_library(&pkg, &scripts, &[0, 1], &msg), "missing selected package");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &msg[..msg.len() - 1]), "truncated JSON");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &msg.replace("\"linked_libs\":[],", "")), "missing output field");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &msg.replace("\"linked_libs\":[]", "\"linked_libs\":null")), "invalid output field");
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &msg.replace(&quoted(&target), "")), "empty OUT_DIR");
+    assert!(cached_without_library(&pkg, &scripts, &[0, 3], &msg), "duplicate seed uses the same output");
+    assert!(!cached_without_library(&pkg, &scripts, &[0, 2], &format!("{msg}\n{msg}")), "duplicate message cannot cover another feature set");
+    let host_msg = msg.replace(&quoted(&target), &quoted(&host)).replacen('{', "{\"relax_host\":true,", 1);
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &host_msg), "host result cannot replace target");
+    assert!(cached_without_library(&pkg, &scripts, &[0, 2], &format!("{msg}\n{host_msg}")), "host and target outputs survive");
+    // Host libraries belong to Cargo's host build, not the target native library.
+    assert!(cached_without_library(&pkg, &scripts, &[0, 2], &format!("{msg}\n{}", host_msg.replace("\"linked_libs\":[]", "\"linked_libs\":[\"dylib=m\"]"))));
+    std::fs::remove_dir(&host).unwrap();
+    assert!(!cached_without_library(&pkg, &scripts, &[0, 2], &format!("{msg}\n{host_msg}")), "removed host OUT_DIR");
+    std::fs::remove_file(&archive).unwrap();
+    std::fs::remove_dir(&target).unwrap();
+    assert!(!cached_without_library(&pkg, &scripts, &[0], &msg), "removed target OUT_DIR");
 }
 
 /// What this module holds of a run, as a fresh process has it (`run_end`). Nothing of the run is left that could see it.
