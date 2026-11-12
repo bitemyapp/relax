@@ -1080,9 +1080,10 @@ pub unsafe fn _mm_add_epi8(a: __m128i, b: __m128i) -> __m128i {
     vx::vx_binary(a, b, 0, 8)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_and_si128(a: __m128i, b: __m128i) -> __m128i {
-    vx::vx_binary(a, b, 6, 32)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_and_si128(a: __m128i, b: __m128i) -> __m128i {
+    unsafe { vx::vx_binary(a, b, 6, 32) }
 }
 
 #[inline(always)]
@@ -1105,9 +1106,10 @@ pub unsafe fn _mm_clmulepi64_si128<const IMM8: i32>(a: __m128i, b: __m128i) -> _
     vx::vx_binary(a, b, 90 + ((IMM8 & 1) | ((IMM8 >> 3) & 2)) as u32, 64)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_cmpeq_epi8(a: __m128i, b: __m128i) -> __m128i {
-    vx::vx_binary(a, b, 10, 8)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_cmpeq_epi8(a: __m128i, b: __m128i) -> __m128i {
+    unsafe { vx::vx_binary(a, b, 10, 8) }
 }
 
 #[inline(always)]
@@ -1115,9 +1117,10 @@ pub unsafe fn _mm_cmpeq_epi16(a: __m128i, b: __m128i) -> __m128i {
     vx::vx_binary(a, b, 10, 16)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_cmpgt_epi8(a: __m128i, b: __m128i) -> __m128i {
-    vx::vx_binary(a, b, 11, 8)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_cmpgt_epi8(a: __m128i, b: __m128i) -> __m128i {
+    unsafe { vx::vx_binary(a, b, 11, 8) }
 }
 
 pub unsafe fn _mm_cvtsi128_si32(a: __m128i) -> i32 {
@@ -1200,14 +1203,16 @@ pub unsafe fn _mm_min_epi16(a: __m128i, b: __m128i) -> __m128i {
     vx::vx_binary(a, b, 12, 16)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_movemask_epi8(a: __m128i) -> i32 {
-    vx::vx_mask(a, 8)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_movemask_epi8(a: __m128i) -> i32 {
+    unsafe { vx::vx_mask(a, 8) }
 }
 
-#[inline(always)]
-pub unsafe fn _mm_or_si128(a: __m128i, b: __m128i) -> __m128i {
-    vx::vx_binary(a, b, 7, 32)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_or_si128(a: __m128i, b: __m128i) -> __m128i {
+    unsafe { vx::vx_binary(a, b, 7, 32) }
 }
 
 #[inline(always)]
@@ -1225,9 +1230,10 @@ pub unsafe fn _mm_set1_epi16(a: i16) -> __m128i {
     vx::vx_splat(a as u64, 16)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_set1_epi8(a: i8) -> __m128i {
-    vx::vx_splat(a as u64, 8)
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_set1_epi8(a: i8) -> __m128i {
+    unsafe { vx::vx_splat(a as u64, 8) }
 }
 
 pub unsafe fn _mm_set_epi32(e3: i32, e2: i32, e1: i32, e0: i32) -> __m128i {
@@ -1429,8 +1435,9 @@ pub unsafe fn _mm_cmpgt_epi32(a: __m128i, b: __m128i) -> __m128i {
     vx::vx_binary(a, b, 11, 32)
 }
 
-#[inline(always)]
-pub unsafe fn _mm_cmplt_epi8(a: __m128i, b: __m128i) -> __m128i {
+#[inline]
+#[target_feature(enable = "sse2")]
+pub fn _mm_cmplt_epi8(a: __m128i, b: __m128i) -> __m128i {
     _mm_cmpgt_epi8(b, a)
 }
 
