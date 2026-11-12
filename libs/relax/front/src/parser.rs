@@ -1686,6 +1686,32 @@ impl<'a> Parser<'a> {
         if out_of_scope {
             r = None;
         }
+        // Parser-local definitions are preferred by the position-free lookup.
+        // A later file module can nevertheless shadow one of them. Compare only
+        // its known textual bindings here; keep same-file/generated precedence
+        // and qualified or imported bindings on their existing paths.
+        if qual.is_none() && !path.global() {
+            if let (Some(selected), Some(context), Some(modules)) =
+                (r.as_ref(), self.bctx.as_ref(), m.table.crates.get(&self.krate))
+            {
+                if selected.name == name && selected.krate == self.krate && textual(selected) && self.rules_in_textual_scope(selected, seg.name.lo) {
+                    let mut best = selected.clone();
+                    let mut key = None;
+                    for candidate in m.table.defs.get(&name).into_iter().flatten().chain(m.local.iter()).rev() {
+                        if candidate.name != name || candidate.krate != self.krate || candidate.def_file == context.path
+                            || !textual(candidate) || !self.rules_in_textual_scope(candidate, seg.name.lo) { continue; }
+                        if let Some(next) = modules.textual_binding_key(candidate, &module) {
+                            // Allocate position chains only for an actual foreign
+                            // comparison. An unknown selected binding keeps precedence.
+                            if key.is_none() { key = modules.textual_binding_key(&best, &module); }
+                            let Some(previous) = key.as_ref() else { break; };
+                            if next > *previous { key = Some(next); best = candidate.clone(); }
+                        }
+                    }
+                    r = Some(best);
+                }
+            }
+        }
         // a module-relative path (`crate::m!`, `self::m!`, `::k::m!`) to this crate's `#[macro_export]` macro:
         // a macro-expanded one is the lint macro_expanded_macro_exports_accessed_by_absolute_paths (lint_early)
         if qual.is_some() || path.global() {
